@@ -1,0 +1,827 @@
+---
+title: "Final Project"
+format:
+  html:
+    self-contained: true
+    embed-resources: true
+error: true
+editor: visual
+author: "Alison Hall & Lorena Saquicoray "
+date: today
+execute:
+  eval: true  # Evaluate code
+  echo: true  # Show code
+  error: true # Include errors in the output
+  warning: false  # Suppress warnings
+  message: false  # Suppress messages
+---
+
+Our project uses data from the Gun Violence Archive to analyze gun violence trends in the United States. This data set includes detailed information about gun violence incidents, such as dates, locations, fatalities, and injuries. We are interested in analyzing how U.S. gun violence trends have changed over time, as well as how changes in Michigan compare to national trends. We also plan to examine the impact of gun violence on public health by analyzing various gun violence incident characteristics. This approach will produce greater understanding of the scale and severity of gun violence in the U.S.
+
+
+Packages
+
+```{r}
+library(tidyverse)
+library(skimr)
+library(knitr)
+library(ggthemes)
+library(scales)
+library(flextable)
+library(gt)
+library(gtExtras)
+library(mice)
+library(naniar)
+library(janitor)
+library(showtext)
+library(tidytext)
+library(stringr)
+library(lubridate)
+library(ggpubr)
+library(sf)
+library(maps)
+library(viridis)
+library(plotly)
+
+
+```
+
+
+Import the Gun Violence Archive data set.
+
+```{r}
+# Import the Gun Violence data set and create an object called gun_violence
+gun_violence <- read_csv("gun_violence_geo.csv")
+```
+
+Import the United States Census (State-Level) data set.
+
+```{r}
+# Import the U.S. Census (State-Level) data set and create an object called us_state_census
+us_state_census <- read_csv("census_data_state_2008-2023.csv")
+```
+
+
+# Data Dictionary 
+
+```{r}
+#| label: data dictionary
+# Create data frame for the dictionary
+dictionary <- tibble(
+  Variable = c("geoid", "incident_id", "date", "state", "city", "county", "business_or_school", "address", "latitude", "longitude", "number_victims_killed", "number_victims_injured", "number_suspects_killed", "number_suspects_injured", "number_suspects_arrested", "incident_characteristics", "population", "year"),
+  Type = c("Categorical", "Categorical", "Categorical", "Categorical", "Categorical", "Categorical", "Categorical", "Categorical", "Quantitative", "Quantitative", "Quantitative", "Quantitative", "Quantitative", "Quantitative", "Quantiative", "Categorical", "Quantitative", "Categorical"),
+  Description = c("geographic region ID with the first 2 digits being the state Federal Processing Standard (FIPS) code and the last 3 digits the county FIPS code", "gunviolencearchive.org ID for incident", "date of occurrence", "U.S. state", "U.S. city", "U.S. county", "detailed description of business or school where incident occurred (if available)", "address where incident occurred", "latitude of location where incident occurred", "longitude of location where incident occurred", "number of victims killed", "number of victims injured", "number of suspects killed", "number of suspects injured", "number of suspects arrested", "list of incident characteristics", "population", "year when incident occurred"))
+
+dictionary |>
+  flextable() |>
+  set_caption("Data Dictionary") |>
+  autofit()
+
+```
+
+
+Create a lollipop chart to visualize patterns of missingness for the Gun Violence Archive data set.
+
+```{r}
+# Create a lollipop chart for missingness
+gun_violence |>
+  gg_miss_var(show_pct = TRUE) # show percentages
+```
+
+**Analysis**: Most variables in this data set, such as `state`, `number_victims_killed`, and `number_victims_injured`, have no missing values. However, there are two variables that have a high degree of missingness: `county` and `business_or_school`. Nearly 100% of the `county` values are missing, and approximately 80% of the `business_or_school` values are missing. Furthermore, the missing `county` and `business_or_school` values are not "Missing Completely at Random," but are likely the result of systematic data collection limitations.
+
+Since the `county` and `business_or_school` variables have a high degree of missingness, we cannot easily analyze gun violence trends by county or at specific workplaces/schools in our summary statistics and data visualizations. Consequently, we decided to focus our analysis on state-level trends and use variables with little to no missing values.
+
+We also observed that the population values for 2020 are missing from this data set. In the "Data Cleaning" section of this report, we used the `fill()` function to impute the missing values.
+
+# Data Cleaning
+
+## Merging Data Sets
+
+Combine the `gun_violence` and `us_state_census` data sets using `left_join()`.
+
+Extract `year` from the `date` column in the `gun_violence` data set. 
+
+```{r}
+# Extract year from the date column in gun_violence data set
+# This is the first key variable
+gun_violence <- gun_violence |>
+  mutate(year = lubridate::year(date))
+```
+
+Extract the first two digits from the `geoid` column in the `gun_violence` data set.
+
+```{r}
+# Extract first two digits from the geoid column in gun_violence data set
+# This is the second key variable
+gun_violence <- gun_violence |>
+  mutate(stateid = str_sub(geoid, 1, 2))
+```
+
+Combine the `gun_violence` and `us_state_census` data sets using `left_join()` and create an object called `us_gun_violence`.
+
+```{r}
+# Combine the gun_violence and us_state_census data sets using left_join()
+us_gun_violence <- gun_violence |>
+  left_join(us_state_census, by = c("year" = "year", "stateid" = "geoid"))
+```
+
+The population values for 2020 are missing. Use the `fill()` function to impute the missing values.
+
+```{r}
+# Use fill() to impute the missing 2020 population values
+us_gun_violence <- us_gun_violence |> 
+  group_by(state) |>
+  arrange(year) |>
+  fill(population, .direction = c("down")) |>
+  ungroup()
+```
+
+Use `filter()` to check the Michigan population in 2019 and 2020. The 2020 population value should be the same as the 2019 population value: 9,986,857 residents.
+
+```{r}
+# Use filter() to check Michigan population in 2019
+us_gun_violence |>
+  filter(year == "2019" & state == "Michigan") |>
+  dplyr::select(year, state, population) |>
+  slice_head(n = 1)
+```
+
+```{r}
+# Use filter() to check Michigan population in 2020
+us_gun_violence |>
+  filter(year == "2020" & state == "Michigan") |>
+  dplyr::select(year, state, population) |>
+  slice_head(n = 1)
+```
+
+
+
+
+
+## String Manipulation
+
+Clean spacing in the `incident_characteristics` using `str_squish`.
+
+```{r}
+# Clean incident_characteristics using str_squish
+us_gun_violence <- us_gun_violence |>
+  mutate(clean_incident_characteristics = str_squish(incident_characteristics))
+```
+
+Create new variables using `str_detect` and `regex`.
+
+`child_involved`: Indicates if a gun violence incident involved a child.
+
+```{r}
+# Create a new variable called child_involved
+us_gun_violence <- us_gun_violence |>
+  mutate(child_involved = str_detect(clean_incident_characteristics,
+                                     pattern = regex("child", ignore_case = TRUE)))
+```
+
+`domestic_violence`: Indicates if a gun violence incident involved domestic violence. 
+
+```{r}
+# Create a new variable called domestic_violence
+us_gun_violence <- us_gun_violence |>
+  mutate(domestic_violence = str_detect(clean_incident_characteristics,
+                                     pattern = regex("domestic violence", ignore_case = TRUE)))
+```
+
+**Note**: In the `incident_characteristics` column, the Gun Violence Archive labels all gun violence fatalities with the description "Shot - Dead (murder, accidental, or suicide)." Incidents that **only** have this description can be considered "unresolved deaths," or gun violence fatalities in which the specific intent or cause of death is unknown.
+
+`unresolved_deaths`: Gun violence fatalities in which the specific intent or cause of death is unknown.
+
+```{r}
+# Create a new variable called unresolved_deaths
+us_gun_violence <- us_gun_violence |>
+  mutate(unresolved_deaths = (clean_incident_characteristics == "Shot - Dead (murder, accidental, or suicide)"))
+```
+
+`assault_weapon`: Indicates if an assault weapon was used in a gun violence incident. 
+
+```{r}
+# Create a new variable called assault_weapon 
+us_gun_violence <- us_gun_violence |>
+  mutate(assault_weapon = str_detect(clean_incident_characteristics,
+                                     pattern = regex("assault weapon", ignore_case = TRUE)))
+```
+
+`mass_shooting`: Indicates if a gun violence incident was a mass shooting. **Note**: The Gun Violence Archive classifies mass shootings as incidents in which 4 or more people are killed or injured, not including the shooter.
+
+```{r}
+# Create a new variable called mass_shooting
+us_gun_violence <- us_gun_violence |>
+  mutate(mass_shooting = str_detect(clean_incident_characteristics,
+                                     pattern = regex("mass shooting", ignore_case = TRUE)))
+```
+
+`armed_robbery`: Indicates if a gun violence incident was an armed robbery.
+
+```{r}
+# Create a new variable called armed_robbery
+us_gun_violence <- us_gun_violence |>
+  mutate(armed_robbery = str_detect(clean_incident_characteristics,
+                                     pattern = regex("armed robbery", ignore_case = TRUE)))
+```
+
+
+## Date / Time Functions
+
+Extract `month` and `day` from the `date` column in the `us_gun_violence` data set.
+
+```{r}
+# Create a date object
+us_gun_violence <- us_gun_violence |>
+  mutate(date = as.Date(date))
+
+# Extract month and day from the date column in us_gun_violence data set 
+us_gun_violence <- us_gun_violence |>
+  mutate(incident_date_year = year(date),
+         incident_date_month = month(date, label = TRUE, abbr = FALSE),
+         incident_date_day = day(date),
+         incident_date_dayl = wday(date, label = TRUE, abbr = FALSE))
+```
+
+# Exploratory Data Analysis
+
+## Tables of Summary Statistics
+
+### Table 1
+1. Create a table showing the number of victims killed by gun violence in Michigan each year.
+
+```{r}
+# Calculate victims killed in Michigan each year
+us_gun_violence |>
+  filter(state == "Michigan") |>
+  group_by(year) |>
+  summarize(michigan_victims_killed = sum(number_victims_killed, na.rm = TRUE),
+            population = max(population, na.rm = TRUE)) |> # adjust for population
+  mutate(adjusted_michigan_victims_killed = round(michigan_victims_killed / population * 100000, 3)) |> # round
+  flextable() |> 
+  theme_vanilla() |>
+  colformat_double(j = "year", big.mark = "", digits = 0) |>
+  add_header_lines("Table 1: Gun Violence Fatalities in Michigan (2014-2023)") |>
+  set_header_labels(year = "Year", michigan_victims_killed = "Total Fatalities", population = "Population", adjusted_michigan_victims_killed = "Fatality Rate (per 100,000 residents)") |>
+  autofit()
+```
+
+### Table 2
+2. Create a table showing the number of victims killed in "unresolved" gun violence incidents in Michigan each year.
+
+```{r}
+# Calculate victims killed in "unresolved" gun violence incidents in Michigan each year
+us_gun_violence |>
+  filter(state == "Michigan", number_victims_killed > 0, unresolved_deaths == TRUE) |>
+  group_by(year) |>
+  summarize(michigan_unresolved_deaths = sum(number_victims_killed, na.rm = TRUE),
+            population = max(population, na.rm = TRUE)) |>
+  mutate(adjusted_michigan_unresolved_deaths = round((michigan_unresolved_deaths / population) * 100000, 3)) |>
+  flextable() |> 
+  theme_vanilla() |>
+  colformat_double(j = "year", big.mark = "", digits = 0) |>
+  add_header_lines("Table 2: Unresolved Gun Violence Fatalities in Michigan (2014-2023)") |>
+  set_header_labels(year = "Year", michigan_unresolved_deaths = "Total Fatalities", population = "Population", adjusted_michigan_unresolved_deaths = "Fatality Rate (per 100,000 residents)") |>
+  autofit()
+```
+
+### Table 3
+3. Create a table showing the number of victims killed in gun violence incidents that involved children in Michigan each year. 
+
+**Note**: The Gun Violence Archive data set does not provide information on the number of children killed in each gun violence incident. Consequently, this table does not show the number of **children** killed, but rather the number of **victims** killed in incidents where at least one child was involved (i.e. killed or injured). In other words, "victims killed" can include both children and adults.
+
+```{r}
+# Calculate victims killed incidents involving children in Michigan each year
+us_gun_violence |>
+  filter(state == "Michigan", number_victims_killed > 0, child_involved == TRUE) |>
+  group_by(year) |>
+  summarize(michigan_killed_child_involved = sum(number_victims_killed, na.rm = TRUE),
+            population = max(population, na.rm = TRUE)) |> # adjust for population
+  mutate(adjusted_michigan_killed_child_involved = round((michigan_killed_child_involved / population) * 100000, 3)) |>
+  flextable() |> 
+  theme_vanilla() |>
+  colformat_double(j = "year", big.mark = "", digits = 0) |>
+  add_header_lines("Table 3: Fatalities in Child-Involved Gun Violence Incidents in Michigan (2014-2023)") |>
+  set_header_labels(year = "Year", michigan_killed_child_involved = "Total Fatalities", population = "Population", adjusted_michigan_killed_child_involved = "Fatality Rate (per 100,000 residents)") |>
+  autofit()
+```
+
+
+## Data Visualizations
+
+### Line Chart: Domestic Violence Trends
+
+Create a line chart that visualizes the number of victims killed in gun-related domestic violence incidents in Michigan each year.
+
+```{r}
+# Create a subset for domestic violence fatalities in Michigan
+michigan_domestic_violence <- us_gun_violence |>
+  filter(state == "Michigan", number_victims_killed > 0, domestic_violence == TRUE) |>
+  group_by(year) |>
+  summarize(mi_domestic_violence_victims = sum(number_victims_killed, na.rm = TRUE),
+            population = max(population, na.rm = TRUE)) |>
+  mutate(adjusted_mi_domestic_violence_victims = (mi_domestic_violence_victims / population) *100000)
+
+# Create line chart
+michigan_domestic_violence |>
+  ggplot(aes(x = year,
+             y = adjusted_mi_domestic_violence_victims)) +
+  geom_line() +
+  geom_point() +
+  labs(title = "Gun-Related Domestic Violence Fatalities in Michigan (2014-2023)",
+       subtitle = "Per 100,000 residents",
+       x = "Year",
+       y = "Fatalities (per 100,000 residents)",
+       caption = "Data source: Gun Violence Archive") +
+  theme_bw(base_size = 12) +
+  theme(text = element_text(face = "bold"))
+```
+**Analysis:** Michigan experienced a sharp increase in gun-related domestic violence fatalities from 2017 to 2018. In 2017 there were approximately 0.28 fatalities per 100,000 people and in 2018 there were approximately 0.74 fatalities per 100,00 people.
+
+From 2014 to 2023, 2022 had the highest rate of gun-related domestic violence fatalities at approximately 0.86 fatalities per 100,000 people.
+
+### Line Chart: Unresolved Fatatalities in Michigan
+
+Create a line chart that visualizes the number of unresolved gun violence fatalities in Michigan each year.
+
+
+```{r}
+# Create a subset for unresolved fatalities in Michigan
+michigan_unresolved_deaths <- us_gun_violence |>
+  filter(state == "Michigan", unresolved_deaths == TRUE) |>
+  group_by(year) |>
+  summarize(mi_unresolved_gun_deaths = sum(number_victims_killed, na.rm = TRUE),
+            population = max(population, na.rm = TRUE)) |> # adjust for population
+  mutate(adjusted_mi_unresolved_gun_deaths = (mi_unresolved_gun_deaths / population) *100000)
+```
+
+```{r}
+# Create line chart
+michigan_unresolved_deaths |>
+  ggplot(aes(x = year,
+             y = adjusted_mi_unresolved_gun_deaths)) +
+  geom_line() +
+  geom_point() +
+  labs(title = "Unresolved Gun Violence Fatalities in Michigan (2014-2023)",
+       subtitle = "Per 100,000 residents",
+       x = "Year",
+       y = "Number of fatalities (per 100,000 residents",
+       caption = "Data source: Gun Violence Archive") +
+  theme_bw(base_size = 12) +
+  theme(text = element_text(face = "bold"))
+```
+
+**Analysis:** Michigan experienced a sharp increase in unresolved gun violence fatalities from 2019 to 2020. In 2019 there were approximately 1.56 fatalities per 100,000 people and in 2020 there were approximately 2.70 fatalities per 100,00 people.
+
+From 2014 to 2023, the year 2020 also had the highest rate of unresolved gun violence fatalities.
+
+### Scatter plot: Fatalitites vs Injuries
+
+Create a scatter plot that visualizes the relationship between gun violence fatalities and injuries in 2023 to determine if incidents with a high number of fatalities also have a high number of injuries.
+
+```{r}
+# Calculate total victims killed and total victims injured in the United States in 2023
+us_gun_casualties <- us_gun_violence |>
+  filter(year == "2023") |>
+  group_by(state) |>
+  summarize(us_victims_killed = sum(number_victims_killed, na.rm = TRUE),
+            us_victims_injured = sum(number_victims_injured, na.rm = TRUE),
+            population = max(population, na.rm = TRUE)) |>
+  mutate(adjusted_us_victims_killed = (us_victims_killed / population) * 100000) |>
+  mutate(adjusted_us_victims_injured = (us_victims_injured / population) * 100000)
+```
+
+```{r}
+# Create scatter plot
+us_gun_casualties |>
+  ggplot(aes(x = adjusted_us_victims_killed,
+         y = adjusted_us_victims_injured)) +
+  geom_point() +
+  geom_smooth(color = "dodgerblue", method = "lm", se = FALSE, size = 1) +
+  stat_regline_equation(label.x = 3, label.y = 40) +
+  stat_cor(aes(label = ..r.label..),
+           label.x = 3, label.y = 35) +
+  labs(title = "Relationship Between Gun Violence Fatalities and Injuries in the U.S. (2023)",
+       subtitle = "Per 100,000 residents",
+       x = "Victims killed (per 100,000 residents)",
+       y = "Victims injured (per 100,000 residents)",
+       caption = "Data source: Gun Violence Archive") +
+  theme_bw(base_size = 10) +
+  theme(text = element_text(face = "bold"))
+```
+**Analysis**: The correlation coefficient is 0.8, so there is a strong, positive linear relationship between the number of victims killed and the number of victims injured. Additionally, the slope is 1.8, so for every victim killed, nearly 2 people are injured.
+
+
+### Interactive Scatterplot
+
+
+```{r}
+# Create scatter plot
+p <- us_gun_casualties |>
+  ggplot(aes(x = adjusted_us_victims_killed,
+         y = adjusted_us_victims_injured)) +
+  geom_point(aes(text = paste0("<b>", state, "</b>",
+                               "<br>Victims Killed: ", round(adjusted_us_victims_killed, 2), 
+                               "<br>Victims Injured: ", round(adjusted_us_victims_injured, 2)))) +
+  geom_smooth(color = "dodgerblue", method = "lm", se = FALSE, size = 1) +
+  labs(title = "Relationship Between Gun Violence Fatalities and Injuries in the U.S. (2023)",
+       subtitle = "Per 100,000 residents",
+       x = "Victims killed (per 100,000 residents)",
+       y = "Victims injured (per 100,000 residents)",
+       caption = "Data source: Gun Violence Archive") +
+  theme_bw(base_size = 10) +
+  theme(text = element_text(face = "bold"))
+
+# Make scatter plot interactive 
+ggplotly(p, tooltip = "text")
+```
+**Analysis:** Illinois is an outlier: it has a high number of injuries compared to fatalities, at approximately 25.83 injuries to 6.98 fatalities.
+
+### Bubble Chart
+
+Create a bubble chart that visualizes the frequency of gun violence incidents in Michigan in 2023 by month and day of the week, where bubble size represents the total number of incidents.
+
+```{r}
+
+# Create a count table
+day_month_counts <- us_gun_violence |>
+  filter(state == "Michigan", incident_date_year == 2023) |>
+  mutate(incident_date_month = fct_relevel(incident_date_month, month.name),
+         incident_date_dayl  = fct_relevel(incident_date_dayl, 
+                                           "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", 
+                                           "Saturday", "Sunday")) |>
+  count(incident_date_month, incident_date_dayl)
+```
+
+```{r}
+# Create bubble chart
+day_month_counts |>
+  ggplot(aes(x = incident_date_dayl, 
+             y = incident_date_month, 
+             size = n, 
+             fill = n)) + 
+  geom_point(pch = 21, color = "white", stroke = 0.5) +
+  scale_x_discrete(drop = FALSE) +
+  scale_y_discrete(drop = FALSE) +
+  scale_fill_gradient(low = "lightblue", 
+                      high = "blue", 
+                      name = "Number of incidents",
+                      guide = "legend") +  
+  scale_size_continuous(name = "Number of incidents",
+                        range = c(1, 6), 
+                        guide = "legend") +  
+  labs(title = "Gun Violence Incidents", 
+       subtitle = "Frequency of Gun Violence Incidents in Michigan by Month and Day (2023)", 
+       x = "Day of the week", 
+       y = "Month",
+       caption = "Data source: Gun Violence Archive") +
+  theme_minimal() +
+  theme(legend.position = "bottom",
+        text = element_text(size = 12, face = "bold"))
+```
+
+**Analysis:**Incidents seem to be more frequent in late spring and summer month, especially April through August. Something to highlight is the higher frequency on the weekends. On the other hand we have the cooler month November and December with noticeable lower frequency. Overall, the patterns suggest that in the incidents significantly increase on the warmer month and in the weekends indicating that the weather and the day of the week may have a correlation with the incidents. 
+
+
+### Barchart
+
+Create a bar chart that visualizes common characteristics in gun violence incidents in Michigan 2023 (i.e., domestic violence, police officer involvement, intoxication, etc.)
+```{r}
+michigan_incident_characteristics <- us_gun_violence |>
+  filter(state == "Michigan", year == "2023") |>
+  mutate(
+    drive_by = str_detect(incident_characteristics, regex("drive-by", ignore_case = TRUE)),
+    school = str_detect(incident_characteristics, regex("school", ignore_case = TRUE)),
+    officer = str_detect(incident_characteristics, regex("officer", ignore_case = TRUE)),
+    drug_alcohol = str_detect(incident_characteristics, regex("under the influence", ignore_case = TRUE)),
+    home_invasion = str_detect(incident_characteristics, regex("home invasion", ignore_case = TRUE)),
+    workplace = str_detect(incident_characteristics, regex("workplace", ignore_case = TRUE)),
+    
+    incident_type = case_when(
+      child_involved ~ "Child Involved",
+      domestic_violence ~ "Domestic Violence",
+      drive_by ~ "Drive-By", 
+      school ~ "School Related",
+      officer ~ "Officer Involved",
+      mass_shooting ~ "Mass Shooting",
+      drug_alcohol ~ "Substance Related", 
+      home_invasion ~ "Home Invasion", 
+      workplace ~ "Workplace", 
+      armed_robbery ~"Armed Robbery",
+      TRUE ~ "Other"
+  ))
+```
+
+```{r}
+# Create summary statistics table
+characteristics_summary <- michigan_incident_characteristics |>
+  filter(incident_type != "Other") |>
+  group_by(incident_type) |>
+  summarise(
+    count = n(),
+    avg_killed = mean(number_victims_killed, na.rm = TRUE),
+    avg_injured = mean(number_victims_injured, na.rm = TRUE),
+    .groups = "drop"
+  ) |>
+  arrange(desc(count))
+```
+
+```{r}
+# Create bar chart
+ggplot(characteristics_summary, aes(x = fct_reorder(incident_type, count), y = count)) +
+  geom_col(fill = "steelblue") +
+  coord_flip() +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.1))) +
+  labs(title = "Gun Violence Incidents by Category (Michigan, 2023)",
+       x = "Incident Category",
+       y = "Number of Incidents",
+       caption = "Source: Gun Violence Archive") +
+  theme_minimal() +
+  theme(text = element_text(face = "bold"))
+```
+
+**Analysis:** The bar chart shows that `domestic violence` related incidents are the most common category of gun violence in Michigan 2023, followed by `drive-by`and `officer-involved incidents`. `Child- involved` cases and mass shooting occur at lower frequencies while `workplace` and `substance related` are the least common. 
+
+
+### Side by side boxplot
+
+Create a side-by-side box plot that visualizes the distribution of casualties (i.e. fatalities and injuries) from gun violence incidents that did involve and did not involve an assault weapon.
+
+```{r}
+# Subset data and define factor levels
+assault_weapon_subset <- us_gun_violence |>
+  dplyr::select(everything()) |>
+  mutate(assault_weapon = case_when(assault_weapon == TRUE ~ "Yes",
+                                    assault_weapon == FALSE ~ "No",
+                                    TRUE ~ "Not listed")) |>
+  mutate(assault_weapon = factor(assault_weapon, levels = c("Yes", "No", "Not listed")))
+```
+
+```{r}
+# Create a new variable called total_casualties
+assault_weapon_subset <- assault_weapon_subset |>
+  mutate(total_casualties = log1p(number_victims_killed + number_victims_injured))
+```
+
+```{r}
+# Create side-by-side box plot
+assault_weapon_subset |>
+  ggplot(aes(x = assault_weapon,
+             y = total_casualties,
+             fill = assault_weapon)) +
+  geom_boxplot() +
+  scale_fill_viridis_d() + # add color-blind friendly palette
+  labs(title = "Distribution of Total Gun Violence Casualties by Assault Weapon Use",
+       subtitle = "United States (2014-2023)",
+       x = "Assault Weapon Use",
+       y = "Total casualties (log(total_casualties = 1))", # y-axis label: log(total_casualties + 1)
+       caption = "Data source: Gun Violence Archive") +
+  theme_few(base_size = 12) +
+  theme(legend.position = "none", # suppress the legend
+        text = element_text(face = "bold"))
+```
+**Analysis:** The median value is approximately the same between assault weapon use and no assault weapon use. The box plot for assault weapon use has a longer box, indicating greater variability in the middle 50% of the data. Although assault weapon use and no assault weapon use have outliers, those for assault weapon use are greater.
+
+
+### Histogram 
+
+Create a histogram of victims killed in Michigan incidents (2023)
+
+
+```{r}
+# Create histogram
+ggplot(data = filter(us_gun_violence, state == "Michigan", number_victims_killed > 0), 
+       aes(x = number_victims_killed)) +
+  geom_histogram(binwidth = 1, fill = "steelblue", color = "white") +
+  theme_minimal() +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.05))) +
+  labs(title = "Distribution of Fatalities in Michigan Gun Violence Incidents (2023)",
+       subtitle = "Incidents with at least one fatality",
+       x = "Victims Killed per Incident",
+       y = "Frequency",
+       caption = "Source: Gun Violence Archive") +
+  theme_minimal(base_size = 11) +
+  theme(text = element_text(face = "bold"))
+```
+
+
+**Analysis:**Looking at this graph we can observe the vast majority of incident involve **one fatality** plotting a **right-skewed** histogram. The first bar shows the frequency of over 3000 incidents. There is a **long-tail distribution** as the number of victims per incidents increases. 
+Incident with **two fatalities** are much less common- being less than 500. 
+Incidents with **three or more fatalitites** are statistically rare, represented by a very small bar. 
+
+
+### Choropleth map 
+
+```{r}
+# Pull a map of the U.S.
+states_map <- st_as_sf(map("state", plot = FALSE, fill = TRUE))
+
+# Filter the data
+choropleth_data <- us_gun_violence |>
+  filter(year == 2023) |>
+  group_by(state) |>
+  summarize(total_killed = sum(number_victims_killed, na.rm = TRUE), 
+            population = max(population, na.rm = TRUE),
+            rate_per_100k = (total_killed / population) * 100000,
+    .groups = "drop") |>
+  mutate(state = tolower(state)) # lower case conversion to match the map
+
+# Join map with the data
+map_data <- states_map |>
+  left_join(choropleth_data, by = c("ID" = "state"))
+
+# Create choropleth map
+ggplot(map_data) +
+  geom_sf(aes(fill = rate_per_100k), color = "white") +
+  scale_fill_viridis_c(option = "plasma", na.value = "grey80") +
+  labs(title = "Gun Violence Fatality Rate by State",
+       subtitle = "United States (2023)",
+       fill = "Deaths per 100k") +
+  theme_minimal() +
+  theme(axis.text = element_blank(),
+        axis.ticks = element_blank(),
+        text = element_text(face = "bold"))
+
+```
+
+**Analysis:**The map shows the rate gun violence fatalities per 100,000 people across the states in the U.S. Some of the important take aways are:
+
+
+The **South** stands out with higher rates: States like Louisiana, Alabama, and Mississippi appear in yellow/orange, indicating the highest fatality rates. This suggests gun violence is more severe relative to population in these areas.
+
+Lower rates in the **Northeast** and parts of the **Midwest**:States in the Northeast (e.g., New York, Massachusetts) and some Midwest states show darker purple, meaning lower death rates.
+
+Some states in the **West** (like California) show moderate to lower rates, while others are slightly higher.
+There’s no consistent regional pattern like in the South.
+
+**Michigan** appears mid-range (pink/purple)
+
+Overall,  we can conclude that gun violence is not evenly distributed across the U.S.Certain regions (especially the South) experience disproportionately higher fatality rates. 
+
+# Permutation or Randomization Test 
+
+### Two-Sample $t$-test
+
+### Statement of Hypotheses
+
+$$H_0: \mu_{\text{NotArmedRobbery}} = \mu_{\text{ArmedRobbery}}$$
+
+$$H_a: \mu_{\text{NotArmedRobbery}} > \mu_{\text{ArmedRobbery}}$$
+where $\mu_{\text{NotArmedRobbery}}$ is the average number of victims killed in gun violence incidents that are not armed robberies, and $\mu_{\text{ArmedRobbery}}$ is the average number of victims killed armed robberies.
+
+```{r}
+# Two-sample t-test
+ttest_result <- t.test(formula = number_victims_killed ~ armed_robbery,
+                       data = us_gun_violence,
+                       alternative = "greater")
+
+# Display results of t-test
+ttest_result |> 
+  broom::tidy() |> 
+  flextable() |> 
+  colformat_double(digits = 3) |> 
+set_formatter(p.value = function(x) {format.pval(x, digits = 3)}) |> 
+  set_caption("Results of two-sample t-test comparing the average number of victims killed between incidents that are not armed robberies and incidents that are armed robberies.") |> 
+  autofit() |> 
+  fit_to_width(max_width = 7)
+```
+
+Calculate the mean for each group to check the factor levels. 
+
+```{r}
+# Check factor levels
+us_gun_violence |>
+  group_by(armed_robbery) |>
+  summarize(avg_armed_robbery_fatalities = mean(number_victims_killed, na.rm = TRUE))
+
+# Group 1 = not armed robbery incidents and Group 2 = armed robbery incidents
+```
+
+### Decision
+
+Since the p-value = 0.0000000000000002 < 0.05, we reject the null at the 5% significance level.
+
+### Interpretation
+
+We have sufficient evidence that the average number of victims killed in gun violence incidents that are not armed robberies was greater than the average number of victims killed in armed robberies.
+
+## Randomization Test
+
+Check if the variances are equal for each group.
+
+```{r}
+# Calculate standard deviations and variances for each group
+us_gun_violence |> 
+  group_by(armed_robbery) |> 
+  summarize(Mean = mean(number_victims_killed),
+            n = n(),
+            SD = sd(number_victims_killed),
+            Variance = var(number_victims_killed)) |> 
+  flextable() |> 
+  colformat_double(digits = 3) |> 
+  autofit()
+
+# False = not armed robbery incidents and True = armed robbery incidents
+```
+
+Implement a two-sample $t$-test for 500 random permutations of individuals to create the null distribution of test statistics for the randomization test.
+
+```{r}
+# Number of permutations to do
+n_permutations <- 500
+
+# Instantiate vector for test statistics
+permutation_statistics <- vector(length = n_permutations)
+
+# Calculate t-test statistic for each permutation
+for(p in 1:n_permutations) {
+  permutation_statistics[p] <- t.test(formula = number_victims_killed ~ armed_robbery,
+                                      alternative = "greater",
+                                      data = us_gun_violence |> 
+    mutate(armed_robbery = sample(armed_robbery, replace = FALSE))) |> 
+    broom::tidy() |> 
+    pull(statistic)
+}
+```
+
+Create a histogram displaying the null distribution obtained for the randomization test. Add vertical lines to the plot to indicate where the 95th percentile is (a solid red line), and where our observed test statistic is (dotted blue line).
+
+```{r}
+# Tidy the test statistic and visualize
+tibble(value = permutation_statistics) |>
+  ggplot(aes(x = value)) +
+  geom_histogram(color = "white") +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.1))) +
+  geom_vline(xintercept = quantile(permutation_statistics, probs = 0.95), color = "red") +
+  geom_vline(xintercept = ttest_result$statistic, color = "dodgerblue", linetype = "dotted") +
+  labs(title = "Randomization test null distribution",
+       x = "Test statistic",
+       y = "Frequency")
+```
+
+Calculate the p-value for the randomization test. The p-value can be calculated as the proportion of randomization test statistics greater than or equal to our observed t-test statistic due to our stated hypotheses.
+
+```{r}
+ttest_result$statistic
+```
+
+```{r}
+mean(permutation_statistics >= ttest_result$statistic)
+```
+
+### Decision
+
+Since the p-value = 0.00 < 0.05, we reject the null at the 5% significance level.
+
+### Interpretation
+
+We have sufficient evidence that the average number of victims killed in gun violence incidents that are not armed robberies was greater than the average number of victims killed in armed robberies. 
+
+# Conclusions / Main Takeaways
+
+We observed several notable trends in our analysis:
+
+- **Table 1** showed that gun violence fatalities in Michigan increased sharply from 2019 to 2020, from 3.605 to 5.868 fatalities per 100,000 people. Additionally, 2021 experienced the highest fatality rate, at 6.11 fatalities per 100,000 people.
+
+- The second **line chart** focused on unresolved gun violence fatalities in Michigan. It is important to note that the Gun Violence Archive labels all gun violence fatalities with the description "Shot - Dead (murder, accidental, or suicide)." Incidents that **only** have this description can be considered "unresolved deaths," or gun violence fatalities in which the specific intent or cause of death is unknown. Consequently, the actual fatality rate from murders, accidental shootings, or suicides is likely higher than what might be calculated after simply filtering for a key word like "murder."
+
+- The **scatter plot** showed a strong, positive relationship between gun violence fatalities and injuries in the U.S. in 2023. Incidents where a higher number of victims were killed usually had a higher number of victims injured, indicating that severe incidents also resulted in greater overall harm.
+
+- The **bubble chart** showed seasonal and daily patterns in gun violence incidents in Michigan 2023. Incidents tended to occur more frequently during warmer months and on weekends (Fridays, Saturdays, and Sundays). Additional analysis is needed to determine if there is a causal relationship between time of year or day of week and incident frequency.
+
+- The **bar chart** of incident characteristics showed that domestic violence incidents were the most frequent incident type in Michigan 2023. However, when comparing severity, incidents that involved drug or substance use tended to have a high average number of deaths per incident, suggesting that less frequent incident types can be more lethal.
+
+- The **two-sample $t$-test** found a statistically significant difference between armed robberies and incidents that were not armed robberies. The average number of victims killed in incidents that were not armed robberies is greater, suggested that armed robberies do not have the most fatalities on average. 
+
+
+# Contributions of each group member
+
+**Alison Sall** took the lead on:
+
+- Creating the summary statistics tables.
+- Creating the lollipop chart.
+- Creating and interpreting the line charts, scatter plot, and box plot.
+
+**Lorena Saquicoray** took the lead on: 
+
+- Interpreting the lollipop chart. 
+- Creating and interpreting the bubble chart, bar chart, histogram, and choropleth chart.
+
+Alison and Lorena collaborated on: 
+
+- Writing the introduction and conclusion. 
+- Creating the data dictionary.
+- Developing the t-test and randomization test.
+- Reviewing and editing each other's visualizations and interpretations.
+
+
+
+
+
+
+
+
+
+
+
