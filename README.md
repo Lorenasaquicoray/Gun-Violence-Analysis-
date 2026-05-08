@@ -18,9 +18,13 @@ Using R, we performed data cleaning, exploratory data analysis, visualization, a
 - What incident characteristics are most common?
 - What geographic patterns can be identified across states and counties?
 
+
 ## Data Sources
 - Gun Violence Archive
 - U.S. Census Data
+- [Gun Violence Archive](https://www.gunviolencearchive.org/)
+
+> Note: The `gun_violence_geo.csv` file is not included in this repository because it exceeds GitHub's file size limits. The data can be obtained from the Gun Violence Archive website listed above.
 
 ## Tools and Packages
 This project was completed in R using:
@@ -40,7 +44,7 @@ This project was completed in R using:
 ## Files Included
 - `final_project.qmd` → Quarto source file
 - `final_project.html` → Rendered project report
-- `gun_violence_geo.csv` → Gun violence dataset
+- `gun_violence_geo.csv` → Gun violence dataset (website)
 - `census_data_state_2008-2023.csv` → Census dataset
 
 ## Key Features
